@@ -36,22 +36,15 @@ import static mindustry.Vars.*;
 public class Turret extends ReloadTurret{
     //after being logic-controlled and this amount of time passes, the turret will resume normal AI
     public final static float logicControlCooldown = 60 * 2;
+    static final float ammoEpsilon = 0.0001f;
 
     /** Ticks between attempt at finding a target. */
     public float targetInterval = 20;
     /** Target interval for when this turret already has a valid target. -1 = targetInterval */
     public float newTargetInterval = -1f;
 
-    /** Maximum ammo units stored. */
-    public int maxAmmo = 30;
-    /** Ammo units used per shot. */
-    public int ammoPerShot = 1;
     /** If true, ammo is only consumed once per shot regardless of bullet count. */
     public boolean consumeAmmoOnce = true;
-    /** Minimum input heat required to fire. */
-    public float heatRequirement = -1f;
-    /** Maximum efficiency possible, if this turret uses heat. */
-    public float maxHeatEfficiency = 3f;
 
     /** Bullet angle randomness in degrees. */
     public float inaccuracy = 0f;
@@ -100,8 +93,6 @@ public class Turret extends ReloadTurret{
     public boolean targetHealing = false;
     /** If true, this turret can be controlled by players. */
     public boolean playerControllable = true;
-    /** If true, this block will display ammo multipliers in its stats (irrelevant for certain types of turrets). */
-    public boolean displayAmmoMultiplier = true;
     /** If false, 'under' blocks like conveyors are not targeted. */
     public boolean targetUnderBlocks = true;
     /** If true, the turret will always shoot when it has ammo, regardless of targets in range or any control. */
@@ -185,25 +176,14 @@ public class Turret extends ReloadTurret{
         super.setStats(stats);
 
         stats.add(Stat.inaccuracy, (int)inaccuracy, StatUnit.degrees);
-        stats.add(Stat.reload, 60f / (reload + (!reloadWhileCharging ? shoot.firstShotDelay : 0f)) * shoot.shots, StatUnit.perSecond);
+        float shotsPerSecond = 60f / (reload + (!reloadWhileCharging ? shoot.firstShotDelay : 0f));
+        stats.add(Stat.reload, shoot.shots != 1 ?
+            //shots X trigger pulls/second
+            StatValues.string("@[lightgray]×[] @ @", shoot.shots, StatValues.fixValue(shotsPerSecond), StatUnit.perSecond.localized()) :
+            //shots per pull is 1, so just display shots/sec
+            StatValues.number(shotsPerSecond, StatUnit.perSecond));
         stats.add(Stat.targetsAir, targetAir);
         stats.add(Stat.targetsGround, targetGround);
-        if(ammoPerShot != 1) stats.add(Stat.ammoUse, ammoPerShot, StatUnit.perShot);
-        if(heatRequirement > 0) stats.add(Stat.input, heatRequirement, StatUnit.heatUnits);
-        if(heatRequirement > 0 && maxHeatEfficiency > 0) stats.add(Stat.maxEfficiency, (int)(maxHeatEfficiency * 100f), StatUnit.percent);
-    }
-
-    @Override
-    public void setBars(){
-        super.setBars();
-
-        if(heatRequirement > 0){
-            addBar("heat", (TurretBuild entity) ->
-            new Bar(() ->
-            Core.bundle.format("bar.heatpercent", (int)entity.heatReq, (int)(Math.min(entity.heatReq / heatRequirement, maxHeatEfficiency) * 100)),
-            () -> Pal.lightOrange,
-            () -> entity.heatReq / heatRequirement));
-        }
     }
 
     @Override
@@ -260,9 +240,13 @@ public class Turret extends ReloadTurret{
     }
 
     public static abstract class AmmoEntry{
-        public int amount;
+        public float amount;
 
         public abstract BulletType type();
+
+        public boolean canShoot(){
+            return amount >= type().ammoUsed - ammoEpsilon;
+        }
     }
 
 
@@ -285,7 +269,7 @@ public class Turret extends ReloadTurret{
         public Vec2 recoilOffset = new Vec2();
 
         public Seq<AmmoEntry> ammo = new Seq<>();
-        public int totalAmmo;
+        public float totalAmmo;
         public float curRecoil, heat, logicControlTime = -1, targetTimer;
         public @Nullable float[] curRecoils;
         public float shootWarmup, charge, warmupHold = 0f;
@@ -297,8 +281,6 @@ public class Turret extends ReloadTurret{
         public boolean wasShooting, isShooting;
         public int queuedBullets = 0;
 
-        public float heatReq;
-        public float[] sideHeat = new float[4];
 
         public @Nullable SoundLoop soundLoop = (loopSound == Sounds.none ? null : new SoundLoop(loopSound, loopSoundVolume));
 
@@ -411,7 +393,6 @@ public class Turret extends ReloadTurret{
         public double sense(LogicProp sensor){
             return switch(sensor){
                 case ammo -> totalAmmo;
-                case ammoCapacity -> maxAmmo;
                 case rotation -> rotation;
                 case shootX -> World.conv(targetPos.x);
                 case shootY -> World.conv(targetPos.y);
@@ -540,10 +521,6 @@ public class Turret extends ReloadTurret{
                 logicControlTime -= Time.delta;
             }
 
-            if(heatRequirement > 0){
-                heatReq = calculateHeat(sideHeat);
-            }
-
             if(rotate){
                 //sync underlying rotation; 0-3 rotation is a shadowed field
                 ((Building)this).rotation = Mathf.mod(Mathf.round(rotation / 90f), 4);
@@ -623,14 +600,6 @@ public class Turret extends ReloadTurret{
             super.handleLiquid(source, liquid, amount);
         }
 
-        @Override
-        public boolean canConsume(){
-            if(heatRequirement > 0 && heatReq <= 0f){
-                return false;
-            }
-            return super.canConsume();
-        }
-
         protected boolean validateTarget(){
             return !Units.invalidateTarget(target, canHeal() ? Team.derelict : team, x, y) || controlled() || logicControlled();
         }
@@ -674,23 +643,18 @@ public class Turret extends ReloadTurret{
             return moveWhileCharging || !charging();
         }
 
-        @Override
-        public void updateEfficiencyMultiplier(){
-            if(heatRequirement > 0){
-                efficiency *= Math.min(Math.max(heatReq / heatRequirement, cheating() ? 1f : 0f), maxHeatEfficiency);
-            }
-        }
-
         /** Consume ammo and return a type. */
         public BulletType useAmmo(){
             if(cheating()) return peekAmmo();
 
             AmmoEntry entry = ammo.peek();
-            entry.amount -= ammoPerShot;
-            if(entry.amount <= 0) ammo.pop();
-            totalAmmo -= ammoPerShot;
-            totalAmmo = Math.max(totalAmmo, 0);
-            return entry.type();
+            BulletType type = entry.type();
+            entry.amount -= type.ammoUsed;
+            //epsilon accounts for float error from fractional ammo use
+            if(entry.amount <= ammoEpsilon) ammo.pop();
+            totalAmmo = Math.max(totalAmmo - type.ammoUsed, 0f);
+            if(ammo.isEmpty()) totalAmmo = 0f;
+            return type;
         }
 
         /** @return the ammo type that will be returned if useAmmo is called. */
@@ -701,9 +665,9 @@ public class Turret extends ReloadTurret{
         /** @return whether the turret has ammo. */
         public boolean hasAmmo(){
             //skip first entry if it has less than the required amount of ammo
-            if(ammo.size >= 2 && ammo.peek().amount < ammoPerShot){
+            if(ammo.size >= 2 && !ammo.peek().canShoot()){
                 for(int i = 0; i < ammo.size; i ++){
-                    if(ammo.get(i).amount >= ammoPerShot){
+                    if(ammo.get(i).canShoot()){
                         ammo.swap(ammo.size - 1, i);
                         break;
                     }
@@ -713,7 +677,7 @@ public class Turret extends ReloadTurret{
             //used for "side-ammo" like gas in some turrets
             if(!canConsume()) return false;
 
-            return ammo.size > 0 && (ammo.peek().amount >= ammoPerShot || cheating());
+            return ammo.size > 0 && (ammo.peek().canShoot() || cheating());
         }
 
         public boolean charging(){
