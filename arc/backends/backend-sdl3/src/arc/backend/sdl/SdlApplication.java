@@ -217,11 +217,7 @@ public class SdlApplication implements Application{
         if(finalError != null && !createdContext) throw finalError;
 
         if(config.vSyncEnabled){
-            try{
-                check(SDL_GL_SetSwapInterval(1));
-            }catch(SdlError error) {
-                Log.err("Failed to enable V-Sync: @", Strings.getSimpleMessage(error));
-            }
+            check(SDL_GL_SetSwapInterval(1));
         }
 
         if(useAngle){
